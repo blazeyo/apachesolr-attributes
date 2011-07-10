@@ -1,0 +1,10 @@
+name = Apachesolr attributes
+description = Provides apachesolr facets for 2-levels-deep taxonomy vocabularies.
+package = Search Toolkit
+core = 7.x
+
+dependencies[] = apachesolr
+dependencies[] = facetapi
+dependencies[] = taxonomy
+
+configure = admin/config/search/apachesolr/attributes

@@ -1,0 +1,246 @@
+<?php
+/**
+ *  @file
+ *  apachesolr_attributes.module
+ *
+ *  @author blazey http://drupal.org/user/353861
+ */
+
+/**
+ * @todo Add theme to put blocks into to settings form
+ * 
+ * @todo Add weight to settings form
+ */
+
+/**
+ *  Implements hook_menu().
+ */
+function apachesolr_attributes_menu() {
+  $items['admin/config/search/apachesolr/attributes'] = array(
+    'title' => 'Taxonomy attributes',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('apachesolr_attributes_settings_form'),
+    'access arguments' => array('administer search'),
+    'file' => 'apachesolr_attributes.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ *  Implements hook_taxonomy_term_inster().
+ */
+function apachesolr_attributes_taxonomy_term_insert($term) {
+  if (variable_get('apachesolr_attributes_auto_enable', 0)) {
+    foreach (apachesolr_attributes_get_enabled_fields() as $field) {
+      if ($term->vid == $field['vocabulary']->vid) {
+        if ($term->parent[0] == 0) {
+          apachesolr_attributes_enable_facet_block($term, $field['vocabulary']);
+        }
+      }
+    }
+  }
+}
+
+/**
+ *  Implements hook_apachesolr_update_index().
+ *
+ *  @param ApacheSolrDocument $document
+ *  @param $node
+ */
+function apachesolr_attributes_apachesolr_update_index(ApacheSolrDocument &$document, $node) {
+  foreach (apachesolr_attributes_get_enabled_fields() as $field) {
+    $vocabulary = $field['vocabulary'];
+    if (!empty($node->{$field['fieldname']})) {
+      $language = empty($node->language) ? LANGUAGE_NONE : $node->language;
+      foreach ($node->{$field['fieldname']} as $language => $values) {
+        foreach ($values as $key => $value) {
+          $tid = $value['tid'];
+          $parents = taxonomy_get_parents($tid);
+          if (is_array($parents)) {
+            $parent = array_shift($parents);
+            $solr_fieldname = apachesolr_attributes_solr_fieldname($vocabulary, $parent);
+            $document->addField($solr_fieldname, $tid);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ *  Implements hook_facetapi_facet_info().
+ */
+function apachesolr_attributes_facetapi_facet_info($searcher_info) {
+  if ('apachesolr' == $searcher_info['adapter']) {
+    if ('node' == $searcher_info['type']) {
+      foreach (apachesolr_attributes_get_enabled_fields() as $field) {
+        $vocabulary = $field['vocabulary'];
+        foreach (taxonomy_get_tree($vocabulary->vid, 0, 1) as $term) {
+          $solr_fieldname = apachesolr_attributes_solr_fieldname($vocabulary, $term);
+          $facets[$solr_fieldname] = array(
+            'label' => t('@voc_name: @term_name', array(
+                '@voc_name' => $vocabulary->name,
+                '@term_name' => $term->name)),
+            'description' => t('Apachesolr attributes. Filter by term children.'),
+            'field' => $solr_fieldname,
+            'field alias' => $solr_fieldname,
+            'query type' => 'term',
+            'weight' => 0,
+            'values callback' => FALSE,
+            'map callback' => 'facetapi_map_taxonomy_terms',
+//            'hierarchy callback' => 'facetapi_get_taxonomy_hierarchy',
+          );
+        }
+      }
+    }
+  }
+
+  return $facets;
+}
+
+/**
+ *  Builds name for field in solr.
+ *
+ *  @param stdClass $vocabulary
+ *  @param stdClass $term
+ *  @return string
+ */
+function apachesolr_attributes_solr_fieldname($vocabulary, $term) {
+  return 'im_apachesolr_attributes_' . $vocabulary->vid . '_' . $term->tid;
+}
+
+/**
+ *  Returns basic info about all taxonomy_term_reference fields attached to node bundles.
+ *
+ *  @return array
+ */
+function apachesolr_attributes_get_term_reference_fields() {
+  $result = array();
+  foreach (field_info_fields() as $fieldname => $field) {
+    if ($field['type'] == 'taxonomy_term_reference') {
+      foreach (field_info_instances('node') as $bundle => $instances) {
+        foreach ($instances as $instance_fieldname => $instance) {
+          if ($instance_fieldname == $fieldname) {
+            $result[$fieldname] = array(
+              'label' => $instance['label'],
+              'fieldname' => $fieldname,
+              'vocabulary' => taxonomy_vocabulary_machine_name_load($field['settings']['allowed_values'][0]['vocabulary']),
+            );
+          }
+        }
+      }
+    }
+  }
+  return $result;
+}
+
+/**
+ *  Gets field info (fieldname, label and allowed vocabulary).
+ *
+ *  @param string $fieldname
+ *  @return array
+ */
+function apachesolr_attributes_get_field($fieldname) {
+  $fields = &drupal_static(__FUNCTION__, NULL);
+  if (is_null($fields)) {
+    $fields = apachesolr_attributes_get_term_reference_fields();
+  }
+  return $fields[$fieldname];
+}
+
+/**
+ *  Get fields to build facets for.
+ *
+ *  @return array
+ */
+function apachesolr_attributes_get_enabled_fields() {
+  $enabled_fields = array();
+  foreach (variable_get('apachesolr_attributes_fields_enabled', array()) as $fieldname => $enabled) {
+    if (!empty ($enabled)) {
+      $enabled_fields[$fieldname] = apachesolr_attributes_get_field($fieldname);
+    }
+  }
+  return $enabled_fields;
+}
+
+/**
+ *  Enables facet and it's block.
+ *
+ *  @param stdClass $term
+ *  @param stdClass $vocabulary
+ */
+function apachesolr_attributes_enable_facet_block($term, $vocabulary) {
+  $searcher = variable_get('apachesolr_attributes_searcher', '');
+  $realm = variable_get('apachesolr_attributes_realm', 'block');
+  $solr_fieldname = apachesolr_attributes_solr_fieldname($vocabulary, $term);
+
+  $facets = facetapi_get_facet_info($searcher);
+  $facet = $facets[$solr_fieldname];
+
+  apachesolr_attributes_enable_facet($searcher, $facet, $realm);
+
+  if ($realm == 'block') {
+    $theme = variable_get('theme_default', 'bartik');
+    $region = variable_get('apachesolr_attributes_block_region', 'sidebar-first');
+    $weight = -10;
+    apachesolr_attributes_enable_block($searcher, $facet, $theme, $region, $weight);
+  }
+}
+
+/**
+ *  Enables facet in facetapi.
+ *
+ *  @param string $searcher
+ *  @param array $facet
+ *  @param string $realm
+ */
+function apachesolr_attributes_enable_facet($searcher, $facet, $realm) {
+  $adapter = facetapi_adapter_load($searcher);
+
+  $settings = $adapter->getFacet($facet)->getSettings($realm);
+  $settings->enabled = 1;
+
+  if (FALSE === ctools_export_crud_save('facetapi', $settings)) {
+    watchdog(__FUNCTION__, 'Error auto enabling facet for term @tid', array('@tid' => $term->tid), WATCHDOG_ERROR);
+  }
+
+  cache_clear_all('facetapi:delta_map', 'cache');
+}
+
+/**
+ *  Enables facet block in given theme and region with given weight.
+ *
+ *  @param string $searcher
+ *  @param array $facet
+ *  @param string $theme
+ *  @param string $region
+ *  @param double $weight
+ */
+function apachesolr_attributes_enable_block($searcher, $facet, $theme, $region, $weight) {
+  module_load_include('inc', 'facetapi', 'facetapi.block');
+  $map = facetapi_get_delta_map();
+  $delta = facetapi_hash_delta($searcher . ':' . 'block' . ':' . $facet['name']);
+
+  module_load_include('inc', 'block', 'block.admin');
+  block_flush_caches();
+  $block = NULL;
+  foreach (block_admin_display_prepare_blocks($theme) as $candiate) {
+    if ($candiate['delta'] == $delta) {
+      $block = $candiate;
+    }
+  }
+  
+  if ($block) {
+    $block['region'] = $region;
+    $form_state = array(
+      'values' => array(
+        'blocks' => array($block),
+      ),
+    );
+    block_admin_display_form_submit(array(), $form_state);
+  } else {
+    watchdog(__FUNCTION__, 'Error finding block for facet: @facet', array('@facet' => $facet['name']), WATCHDOG_ERROR);
+  }
+}
